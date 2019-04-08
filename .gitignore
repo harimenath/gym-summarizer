@@ -3,4 +3,6 @@ chuvak*
 logs
 .idea
 data/bert/
-
+.vscode/
+__pycache__
+gym_summarizer.egg-info
