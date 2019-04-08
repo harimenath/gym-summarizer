@@ -8,6 +8,7 @@ import pickle
 import tensorflow as tf
 import tensorflow_hub as hub
 
+from bert_serving.client import BertClient
 from typing import List, Dict
 
 
@@ -20,11 +21,37 @@ class SentEmbedder:
     def __init__(self):
         self.embed = hub.Module("https://tfhub.dev/google/universal-sentence-encoder-large/3")
         self.dim = 512
-        self.session = tf.Session()
-        self.session.run([tf.global_variables_initializer(), tf.tables_initializer()])
+        self.se_session = tf.Session()
+        self.se_session.run([tf.global_variables_initializer(), tf.tables_initializer()])
 
     def embed_article(self, sentences: List[str], max_len: int):
-        embeddings = self.session.run(self.embed(sentences))
+        embeddings = self.se_session.run(self.embed(sentences))
+        padded = np.zeros((max_len, self.dim), dtype=np.float32)
+        if len(embeddings) > max_len:
+            padded[:] = embeddings[:max_len]
+        else:
+            padded[:len(embeddings)] = embeddings
+        return padded
+
+
+class BertSentEmbedder(SentEmbedder):
+    def __init__(self, model_dir="data/bert/uncased_L-12_H-768_A-12/", max_seq_len='NONE'):
+        self._init_bert_server(model_dir, max_seq_len)
+        self.bc = BertClient()
+        self.dim = 768
+
+    def _init_bert_server(self, model_dir, max_seq_len):
+        from bert_serving.server.helper import get_args_parser
+        from bert_serving.server import BertServer
+        args = get_args_parser().parse_args(['-model_dir', model_dir,
+                                             '-max_seq_len', max_seq_len,
+                                             '-mask_cls_sep',
+                                             '-cpu'])
+        server = BertServer(args)
+        server.start()
+
+    def embed_article(self, sentences: List[str], max_len: int):
+        embeddings = self.bc.encode(sentences)
         padded = np.zeros((max_len, self.dim), dtype=np.float32)
         if len(embeddings) > max_len:
             padded[:] = embeddings[:max_len]
@@ -101,7 +128,7 @@ class Duc2007Loader(DataLoader):
 class ExtractiveEnv(gym.Env):
     def __init__(self, data_loader: DataLoader = Duc2007Loader("data/dict-duc-2007-articles.pkl",
                                                                "data/df-duc-2007-gold.pkl"),
-                 sent_embedder: SentEmbedder = SentEmbedder(),
+                 sent_embedder: SentEmbedder = BertSentEmbedder(),
                  article_len: int = 20, summary_len: int = 4):
         # helpers
         self.data_loader = data_loader
@@ -114,7 +141,7 @@ class ExtractiveEnv(gym.Env):
         self.sent_embed_dim = sent_embedder.dim
 
         # env attributes
-        self.action_space = gym.spaces.Discrete(self.article_len-1)  # article sentence index selection
+        self.action_space = gym.spaces.Discrete(self.article_len - 1)  # article sentence index selection
         self.observation_space = gym.spaces.Box(
             low=-1,
             high=1,
@@ -158,6 +185,8 @@ class ExtractiveEnv(gym.Env):
         self.sentences_written = 0
         self.rouge_score = 0
         self.actions = set()
+
+        return self._get_obs()
 
     def step(self, action: int):
         done = False
