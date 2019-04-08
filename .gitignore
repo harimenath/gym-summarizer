@@ -1,0 +1,6 @@
+venv/
+chuvak*
+logs
+.idea
+data/bert/
+
