@@ -6,11 +6,16 @@ import numpy as np
 import pandas as pd
 import pickle
 import tensorflow as tf
+from tensorflow.core.example import example_pb2
 import tensorflow_hub as hub
+from pathlib import Path
+import struct
 
 from bert_serving.client import BertClient
-from typing import List, Dict
+from typing import List, Dict, Tuple
 
+
+SENT_EMBEDDING_DIM = 768
 
 class SentEmbedder:
     """
@@ -36,9 +41,10 @@ class SentEmbedder:
 
 class BertSentEmbedder(SentEmbedder):
     def __init__(self, model_dir="data/bert/uncased_L-12_H-768_A-12/", max_seq_len='NONE'):
+        assert Path(model_dir).exists()
         self._init_bert_server(model_dir, max_seq_len)
         self.bc = BertClient()
-        self.dim = 768
+        self.dim = SENT_EMBEDDING_DIM
 
     def _init_bert_server(self, model_dir, max_seq_len):
         from bert_serving.server.helper import get_args_parser
@@ -46,7 +52,7 @@ class BertSentEmbedder(SentEmbedder):
         args = get_args_parser().parse_args(['-model_dir', model_dir,
                                              '-max_seq_len', max_seq_len,
                                              '-mask_cls_sep',
-                                             '-cpu'])
+                                             '-cpu']) # Change this to -gpu?
         server = BertServer(args)
         server.start()
 
@@ -80,6 +86,136 @@ class DataLoader:
 
     def __iter__(self):
         return zip(self.articles, self.summaries)
+
+class DummySentEmbedder(SentEmbedder):
+    """
+    For testing purposes
+    """
+
+    def __init__(self):
+        self.dim = 768
+
+    def embed_article(self, sentences: List[str], max_len: int):
+        return np.random.randn(max_len, self.dim)
+
+class CNNDMLoader(DataLoader):
+    def __init__(self, finished_files_path: str = 'data/finished_files/', sent_embedder: SentEmbedder = None, 
+                 max_number_sentences: int = 20, 
+                 sent_embedding_dim=SENT_EMBEDDING_DIM):
+        """
+        This DataLoader loads the "finished_files" from tokenized CNN-DM dataset from https://github.com/JafferWilson/Process-Data-of-CNN-DailyMail
+        We keep track of sentence embeddings for each sentence of each article as well as the full articles and summaries.
+
+        Parameters
+        ---------
+        finished_files_path: ``str``
+            Path to the  finished_files directory.
+
+        sent_embedder: ``SentEmbedder``
+            Object that embeds sentences into a fixed vector space.
+        """
+
+        assert Path(finished_files_path).exists()
+
+        self.sent_embedder = sent_embedder
+        self.sent_embedding_dim = sent_embedding_dim
+        self.max_number_sentences = max_number_sentences
+
+        # Training 
+        self.train_articles, self.train_summaries = self.load_articles_and_summaries(Path(finished_files_path) / 'train.bin')
+        print("Loading train embeddings...")
+        self.train_article_tensors = self.load_embeddings(Path(finished_files_path) / 'train.vectorized.npz')
+
+        # # Validation 
+        # self.validation_articles, self.validation_summaries = self.load_articles_and_summaries(Path(finished_files_path) / 'val.bin')
+        # print("Loading validation embeddings...")
+        # self.val_article_tensors = self.load_embeddings(Path(finished_files_path) / 'val.vectorized.npz')
+
+        # # Testing
+        # self.test_articles, self.test_summaries = self.load_articles_and_summaries(Path(finished_files_path) / 'test.bin')
+        # print("Loading test embeddings...")
+        # self.test_article_tensors = self.load_embeddings(Path(finished_files_path) / 'test.vectorized.npz')
+
+    def load_articles_and_summaries(self, path_to_binary: Path) -> Tuple[List[str], List[str]]:
+        """
+        Loads articles and summaries from binary files as described in CNNDMLoader docstring.
+
+        Parameters
+        ----------
+
+        path_to_binary: ``str``
+            Path to a train.bin, valid.bin, etc. 
+
+        Returns
+        -------
+        Tuple[List[str], List[str]]
+            A list of: the string articles and summaries respectively.
+        """ 
+
+        print(f"Loading articles and summaries from path: {path_to_binary}...")
+        assert path_to_binary.exists()
+
+        articles: List[str] = []
+        summaries: List[str] = []
+
+        reader = open(path_to_binary, 'rb')
+        while True:
+            len_bytes = reader.read(8)
+            if not len_bytes: break # finished reading this file
+            str_len = struct.unpack('q', len_bytes)[0]
+            example_str = struct.unpack('%ds' % str_len, reader.read(str_len))[0]
+            example = example_pb2.Example.FromString(example_str)
+            try:
+                article = example.features.feature['article'].bytes_list.value[0].decode('utf-8')
+                summary = example.features.feature['abstract'].bytes_list.value[0].decode('utf-8')
+                if len(article) != 0: 
+                    articles.append(article)
+                    summaries.append(summary)
+            except ValueError:
+                print("Failed retrieving an article or abstract.")
+        
+        print(f"Articles and summaries read from path: {path_to_binary}.")
+
+        return articles, summaries
+
+    def load_embeddings(self, embedding_path: Path) -> np.ndarray:
+        assert embedding_path.exists()
+        print(f"Loading embeddings from path: {embedding_path}...")
+        archive = np.load(embedding_path)
+        
+        return archive['arr_0']
+    
+    def embed_articles(self, articles: List[str] = [], outfile: str = '') -> None:
+        """
+        Embeds and saves articles to a .npz file.
+        """
+        assert self.sent_embedder is not None
+        print(f"Saving to path: {outfile}.")
+
+        articles_tensor: np.ndarray = np.zeros((len(articles), self.max_number_sentences, self.sent_embedder.dim))
+
+        for article_idx, article in enumerate(articles):
+            article_sentences = nltk.sent_tokenize(article)
+            articles_tensor[article_idx] = self.sent_embedder.embed_article(article_sentences, self.max_number_sentences)            
+
+        np.savez_compressed(outfile, articles_tensor)
+
+    def __iter__(self):
+        self.i = 0
+        return self
+
+    def __next__(self) -> Tuple[str, np.ndarray, str]:
+
+        if self.i == len(self.train_articles):
+            raise StopIteration
+        else:
+            article = self.train_articles[self.i]
+            article_embedding = self.train_article_tensors[self.i]
+            summary = self.train_summaries[self.i]
+
+            self.i += 1
+
+            return article, article_embedding, summary
 
 
 class Duc2007Loader(DataLoader):
@@ -127,19 +263,16 @@ class Duc2007Loader(DataLoader):
 
 
 class ExtractiveEnv(gym.Env):
-    def __init__(self, data_loader: DataLoader = Duc2007Loader("data/dict-duc-2007-articles.pkl",
-                                                               "data/df-duc-2007-gold.pkl"),
-                 sent_embedder: SentEmbedder = BertSentEmbedder(),
+    def __init__(self, data_loader: DataLoader = CNNDMLoader("data/finished_files/subset/"),
                  article_len: int = 20, summary_len: int = 4):
         # helpers
         self.data_loader = data_loader
         self.data_iterator = iter(self.data_loader)  # yields article(s), summary
-        self.sent_embedder = sent_embedder
 
         # dimensions
         self.article_len = article_len
         self.summary_len = summary_len
-        self.sent_embed_dim = sent_embedder.dim
+        self.sent_embed_dim = data_loader.sent_embedding_dim
 
         # env attributes
         self.action_space = gym.spaces.Discrete(self.article_len - 1)  # article sentence index selection
@@ -171,15 +304,11 @@ class ExtractiveEnv(gym.Env):
         """
         # yield next article/summary
         try:
-            self.article, self.summary_target = next(self.data_iterator)
+            self.article, self.article_tensor, self.summary_target = next(self.data_iterator)
         except StopIteration:
             print("Every article has been loaded, restarting data_iterator")
             self.data_iterator = iter(self.data_loader)
-            self.article, self.summary_target = next(self.data_iterator)
-
-        # tokenize article into sentences and update article_tensor with sentence embeddings
-        self.article = nltk.tokenize.sent_tokenize(self.article)
-        self.article_tensor = self.sent_embedder.embed_article(self.article, self.article_len)
+            self.article, self.article_tensor, self.summary_target = next(self.data_iterator)
 
         # reset everything else
         self.summary_pred = ""
@@ -253,3 +382,9 @@ class ExtractiveEnv(gym.Env):
             score = 0.0
 
         return score
+
+
+# if __name__ == "__main__":
+#     dataloader = CNNDMLoader('./data/finished_files/subset/')
+#     dataloader = CNNDMLoader(finished_files_path='./data/finished_files/subset/', sent_embedder=BertSentEmbedder())
+#     dataloader.embed_articles(dataloader.train_articles, outfile='./data/finished_files/subset/train.vectorized.npz')
