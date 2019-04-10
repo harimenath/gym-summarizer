@@ -53,3 +53,4 @@ tqdm==4.31.1
 urllib3==1.24.1
 Werkzeug==0.15.2
 zmq==0.0.0
+rouge==0.3.1
