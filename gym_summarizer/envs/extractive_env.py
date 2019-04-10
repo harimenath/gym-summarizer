@@ -13,7 +13,10 @@ import struct
 
 from bert_serving.client import BertClient
 from typing import List, Dict, Tuple
-
+from rouge import Rouge
+import random
+import warnings
+from tqdm import tqdm
 
 SENT_EMBEDDING_DIM = 768
 
@@ -42,19 +45,33 @@ class SentEmbedder:
 class BertSentEmbedder(SentEmbedder):
     def __init__(self, model_dir="data/bert/uncased_L-12_H-768_A-12/", max_seq_len='NONE'):
         assert Path(model_dir).exists()
-        self._init_bert_server(model_dir, max_seq_len)
-        self.bc = BertClient()
+        self.bc = self._init_bert_client(model_dir, max_seq_len)
         self.dim = SENT_EMBEDDING_DIM
 
-    def _init_bert_server(self, model_dir, max_seq_len):
-        from bert_serving.server.helper import get_args_parser
-        from bert_serving.server import BertServer
-        args = get_args_parser().parse_args(['-model_dir', model_dir,
-                                             '-max_seq_len', max_seq_len,
-                                             '-mask_cls_sep',
-                                             '-cpu']) # Change this to -gpu?
-        server = BertServer(args)
-        server.start()
+    def _init_bert_client(self, model_dir, max_seq_len):
+        """Initialize bert client for sentence embeddings and avoid restarting bert-server if already running.
+
+        Bert-server can take a long time to start, pollute stdout during training, and create many temp log files.
+        It's highly recommended to run bert-server beforehand from command-line.
+
+        :param model_dir: directory containing bert model
+        :param max_seq_len: max sequence length for bert
+        :return bc: bert-client
+        """
+        try:
+            bc = BertClient()
+        except:
+            from bert_serving.server.helper import get_args_parser
+            from bert_serving.server import BertServer
+            args = get_args_parser().parse_args(['-model_dir', model_dir,
+                                                 '-max_seq_len', max_seq_len,
+                                                 '-mask_cls_sep',
+                                                 '-cpu'])
+            server = BertServer(args)
+            server.start()
+            bc = BertClient()
+
+        return bc
 
     def embed_article(self, sentences: List[str], max_len: int):
         embeddings = self.bc.encode(sentences)
@@ -99,8 +116,8 @@ class DummySentEmbedder(SentEmbedder):
         return np.random.randn(max_len, self.dim)
 
 class CNNDMLoader(DataLoader):
-    def __init__(self, finished_files_path: str = 'data/finished_files/', sent_embedder: SentEmbedder = None, 
-                 max_number_sentences: int = 20, 
+    def __init__(self, finished_files_path: str = 'data/finished_files/', sent_embedder: SentEmbedder = None,
+                 max_number_sentences: int = 20,
                  sent_embedding_dim=SENT_EMBEDDING_DIM):
         """
         This DataLoader loads the "finished_files" from tokenized CNN-DM dataset from https://github.com/JafferWilson/Process-Data-of-CNN-DailyMail
@@ -121,12 +138,12 @@ class CNNDMLoader(DataLoader):
         self.sent_embedding_dim = sent_embedding_dim
         self.max_number_sentences = max_number_sentences
 
-        # Training 
+        # Training
         self.train_articles, self.train_summaries = self.load_articles_and_summaries(Path(finished_files_path) / 'train.bin')
         print("Loading train embeddings...")
-        self.train_article_tensors = self.load_embeddings(Path(finished_files_path) / 'train.vectorized.npz')
+        # self.train_article_tensors = self.load_embeddings(Path(finished_files_path) / 'train.vectorized.npz')
 
-        # # Validation 
+        # # Validation
         # self.validation_articles, self.validation_summaries = self.load_articles_and_summaries(Path(finished_files_path) / 'val.bin')
         # print("Loading validation embeddings...")
         # self.val_article_tensors = self.load_embeddings(Path(finished_files_path) / 'val.vectorized.npz')
@@ -144,13 +161,13 @@ class CNNDMLoader(DataLoader):
         ----------
 
         path_to_binary: ``str``
-            Path to a train.bin, valid.bin, etc. 
+            Path to a train.bin, valid.bin, etc.
 
         Returns
         -------
         Tuple[List[str], List[str]]
             A list of: the string articles and summaries respectively.
-        """ 
+        """
 
         print(f"Loading articles and summaries from path: {path_to_binary}...")
         assert path_to_binary.exists()
@@ -168,12 +185,12 @@ class CNNDMLoader(DataLoader):
             try:
                 article = example.features.feature['article'].bytes_list.value[0].decode('utf-8')
                 summary = example.features.feature['abstract'].bytes_list.value[0].decode('utf-8')
-                if len(article) != 0: 
+                if len(article) != 0:
                     articles.append(article)
                     summaries.append(summary)
             except ValueError:
                 print("Failed retrieving an article or abstract.")
-        
+
         print(f"Articles and summaries read from path: {path_to_binary}.")
 
         return articles, summaries
@@ -182,9 +199,9 @@ class CNNDMLoader(DataLoader):
         assert embedding_path.exists()
         print(f"Loading embeddings from path: {embedding_path}...")
         archive = np.load(embedding_path)
-        
+
         return archive['arr_0']
-    
+
     def embed_articles(self, articles: List[str] = [], outfile: str = '') -> None:
         """
         Embeds and saves articles to a .npz file.
@@ -192,11 +209,12 @@ class CNNDMLoader(DataLoader):
         assert self.sent_embedder is not None
         print(f"Saving to path: {outfile}.")
 
+        # TODO: avoid padding when precomputing/embedding articles
         articles_tensor: np.ndarray = np.zeros((len(articles), self.max_number_sentences, self.sent_embedder.dim))
 
-        for article_idx, article in enumerate(articles):
+        for article_idx, article in tqdm(enumerate(articles), total=len(articles)):
             article_sentences = nltk.sent_tokenize(article)
-            articles_tensor[article_idx] = self.sent_embedder.embed_article(article_sentences, self.max_number_sentences)            
+            articles_tensor[article_idx] = self.sent_embedder.embed_article(article_sentences, self.max_number_sentences)
 
         np.savez_compressed(outfile, articles_tensor)
 
@@ -262,12 +280,61 @@ class Duc2007Loader(DataLoader):
         return article, summary
 
 
+class RewardHelper:
+    def __init__(self, reward_name: str, reward_type: str, error_penalty: float = 0, is_terminal=False,
+                 is_stochastic=False):
+        """Helper class for reward shaping in ExtractiveEnv.
+
+        Currently, this helper class allows these reward-shaping use cases:
+        1.  Constant-type reward (e.g. all episode rewards are rouge-2 f)
+        2.  Scheduled reward (e.g. first 1000 episodes are rouge-1 f, next 1000 episodes are rouge-2 f)
+            Requires updating the env's reward helper during training with a stable-baselines callback.
+            e.g. env.reward_helper = RewardHelper(**new_params)
+        3.  Stochastic reward types.
+        4.  Terminal rewards (only returned at end-of-episode) vs intermediate rewards (returned every action).
+
+        :param reward_name: ROUGE algorithm ('rouge-1', 'rouge-2', 'rouge-l')
+        :param reward_type: ROUGE type ('f', 'r', 'p') i.e. F1, Precision, Recall
+        :param is_terminal: Whether to return reward only on episode termination
+        :param is_stochastic: Whether to return random ROUGE algorithm/type score
+        """
+        assert reward_name in ['rouge-1', 'rouge-2', 'rouge-l']
+        assert reward_type in ['f', 'r', 'p']
+
+        self.reward_name = reward_name
+        self.reward_type = reward_type
+        self.error_penalty = error_penalty
+        self.is_terminal = is_terminal
+        self.is_stochastic = is_stochastic
+
+        self.reward_calculator = Rouge().get_scores
+
+    def get_reward(self, predicted: str, target: str):
+        """Calculates reward (ROUGE) based on specified parameters.
+
+        :param predicted: Agent-generated summary.
+        :param target: Gold-standard reference summary.
+        :return reward: ROUGE score
+        """
+        rewards = self.reward_calculator(predicted, target)[0]
+        if self.is_stochastic:
+            reward = random.choice(sum((list(s.values()) for s in rewards.values()), []))
+        else:
+            reward = rewards[self.reward_name][self.reward_type]
+
+        return reward
+
+
 class ExtractiveEnv(gym.Env):
     def __init__(self, data_loader: DataLoader = CNNDMLoader("data/finished_files/subset/"),
-                 article_len: int = 20, summary_len: int = 4):
+                 reward_helper: RewardHelper = RewardHelper('rouge-2', 'f'),
+                 article_len: int = 20, summary_len: int = 4,
+                 verbose=True):
         # helpers
         self.data_loader = data_loader
         self.data_iterator = iter(self.data_loader)  # yields article(s), summary
+        self.reward_helper = reward_helper
+        self.verbose = verbose
 
         # dimensions
         self.article_len = article_len
@@ -323,20 +390,34 @@ class ExtractiveEnv(gym.Env):
         done = False
 
         if action in self.actions or action >= len(self.article):
-            reward = -0.1
+            reward = self.reward_helper.error_penalty
+            obs = self._get_obs()
+            return obs, reward, done, {"summary": self.summary_pred}
 
         else:
             self.summary_pred += self.article[action]
             self.summary_tensor[self.sentences_written] = self.article_tensor[action]
             self.sentences_written += 1
             self.actions.add(action)
-            reward = self._get_reward()
+            obs = self._get_obs()
 
-        obs = self._get_obs()
+            if self.sentences_written >= self.summary_len:
+                done = True
+                if self.verbose: print(self.summary_pred)
 
-        if self.sentences_written >= self.summary_len:
-            done = True
-            self.reset()
+            if not done and self.reward_helper.is_terminal:
+                reward = 0
+            else:
+                # check for empty strings, provide detailed warning for debugging.
+                if not len(self.summary_pred) or not len(self.summary_target):
+                    warnings.warn(f"[ROUGE WARNING] Attempting to get ROUGE score for str of len 0.\n"
+                                  f"summary_pred: {self.summary_pred}\n"
+                                  f"summary_target: {self.summary_target}\n"
+                                  f"action: {action}\n"
+                                  f"article: {self.article}")
+                    raise
+                else:
+                    reward = self._get_reward()
 
         return obs, reward, done, {"summary": self.summary_pred}
 
@@ -345,7 +426,7 @@ class ExtractiveEnv(gym.Env):
 
     def _get_reward(self):
         prev_rouge = self.rouge_score
-        self.rouge_score = self._lcs_rouge(target=self.summary_target, predicted=self.summary_pred)
+        self.rouge_score = self.reward_helper.get_reward(target=self.summary_target, predicted=self.summary_pred)
         return self.rouge_score - prev_rouge
 
     def _lcs_rouge(self, target, predicted):
@@ -384,7 +465,7 @@ class ExtractiveEnv(gym.Env):
         return score
 
 
-# if __name__ == "__main__":
-#     dataloader = CNNDMLoader('./data/finished_files/subset/')
-#     dataloader = CNNDMLoader(finished_files_path='./data/finished_files/subset/', sent_embedder=BertSentEmbedder())
-#     dataloader.embed_articles(dataloader.train_articles, outfile='./data/finished_files/subset/train.vectorized.npz')
+if __name__ == "__main__":
+    dataloader = CNNDMLoader('data/finished_files/subset/')
+    dataloader = CNNDMLoader(finished_files_path='data/finished_files/subset/', sent_embedder=BertSentEmbedder())
+    dataloader.embed_articles(dataloader.train_articles, outfile='data/finished_files/subset/train.vectorized.npz')
