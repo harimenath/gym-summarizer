@@ -29,6 +29,8 @@ os.makedirs(log_dir, exist_ok=True)
 env_name = 'ExtractiveEnv-v0'
 env = gym.make(env_name)
 env = DummyVecEnv([lambda: env])
-model = A2C(MlpLstmPolicy, env, tensorboard_log=f"../logs/tensorboard/{env_name}/",ent_coef=0.1, verbose=1)
+
+experiment_name = "cnndm_0.0.2"
+model = A2C(MlpLstmPolicy, env, tensorboard_log=f"../logs/tensorboard/{experiment_name}/",ent_coef=0.1, verbose=1)
 # model.learn(total_timesteps=1000, callback=callback)
-model.learn(total_timesteps=1000, callback=callback)
+model.learn(total_timesteps=100000, callback=callback)

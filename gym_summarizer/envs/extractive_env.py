@@ -141,7 +141,7 @@ class CNNDMLoader(DataLoader):
         # Training
         self.train_articles, self.train_summaries = self.load_articles_and_summaries(Path(finished_files_path) / 'train.bin')
         print("Loading train embeddings...")
-        # self.train_article_tensors = self.load_embeddings(Path(finished_files_path) / 'train.vectorized.npz')
+        self.train_article_tensors = self.load_embeddings(Path(finished_files_path) / 'train.vectorized.npz')
 
         # # Validation
         # self.validation_articles, self.validation_summaries = self.load_articles_and_summaries(Path(finished_files_path) / 'val.bin')
@@ -153,7 +153,7 @@ class CNNDMLoader(DataLoader):
         # print("Loading test embeddings...")
         # self.test_article_tensors = self.load_embeddings(Path(finished_files_path) / 'test.vectorized.npz')
 
-    def load_articles_and_summaries(self, path_to_binary: Path) -> Tuple[List[str], List[str]]:
+    def load_articles_and_summaries(self, path_to_binary: Path) -> Tuple[List[List[str]], List[str]]:
         """
         Loads articles and summaries from binary files as described in CNNDMLoader docstring.
 
@@ -165,14 +165,14 @@ class CNNDMLoader(DataLoader):
 
         Returns
         -------
-        Tuple[List[str], List[str]]
-            A list of: the string articles and summaries respectively.
+        Tuple[List[List[str]], List[str]]
+            A list of: string articles split by sentence, and summaries respectively.
         """
 
         print(f"Loading articles and summaries from path: {path_to_binary}...")
         assert path_to_binary.exists()
 
-        articles: List[str] = []
+        articles: List[List[str]] = []
         summaries: List[str] = []
 
         reader = open(path_to_binary, 'rb')
@@ -186,8 +186,8 @@ class CNNDMLoader(DataLoader):
                 article = example.features.feature['article'].bytes_list.value[0].decode('utf-8')
                 summary = example.features.feature['abstract'].bytes_list.value[0].decode('utf-8')
                 if len(article) != 0:
-                    articles.append(article)
-                    summaries.append(summary)
+                    articles.append(nltk.sent_tokenize(article))
+                    summaries.append(summary.replace("<s>", "").replace("</s>", ""))
             except ValueError:
                 print("Failed retrieving an article or abstract.")
 
@@ -202,7 +202,7 @@ class CNNDMLoader(DataLoader):
 
         return archive['arr_0']
 
-    def embed_articles(self, articles: List[str] = [], outfile: str = '') -> None:
+    def embed_articles(self, articles: List[List[str]] = [], outfile: str = '') -> None:
         """
         Embeds and saves articles to a .npz file.
         """
@@ -213,7 +213,6 @@ class CNNDMLoader(DataLoader):
         articles_tensor: np.ndarray = np.zeros((len(articles), self.max_number_sentences, self.sent_embedder.dim))
 
         for article_idx, article in tqdm(enumerate(articles), total=len(articles)):
-            article_sentences = nltk.sent_tokenize(article)
             articles_tensor[article_idx] = self.sent_embedder.embed_article(article_sentences, self.max_number_sentences)
 
         np.savez_compressed(outfile, articles_tensor)
@@ -222,7 +221,7 @@ class CNNDMLoader(DataLoader):
         self.i = 0
         return self
 
-    def __next__(self) -> Tuple[str, np.ndarray, str]:
+    def __next__(self) -> Tuple[List[str], np.ndarray, str]:
 
         if self.i == len(self.train_articles):
             raise StopIteration
@@ -395,29 +394,21 @@ class ExtractiveEnv(gym.Env):
             return obs, reward, done, {"summary": self.summary_pred}
 
         else:
-            self.summary_pred += self.article[action]
+            sentence = self.article[action]
+            self.summary_pred += sentence
             self.summary_tensor[self.sentences_written] = self.article_tensor[action]
             self.sentences_written += 1
             self.actions.add(action)
             obs = self._get_obs()
 
-            if self.sentences_written >= self.summary_len:
+            if self.sentences_written >= min(self.summary_len, len(self.article)):
                 done = True
-                if self.verbose: print(self.summary_pred)
+                if self.verbose: print(self.summary_pred, "\n", "-"*80)
 
             if not done and self.reward_helper.is_terminal:
                 reward = 0
             else:
-                # check for empty strings, provide detailed warning for debugging.
-                if not len(self.summary_pred) or not len(self.summary_target):
-                    warnings.warn(f"[ROUGE WARNING] Attempting to get ROUGE score for str of len 0.\n"
-                                  f"summary_pred: {self.summary_pred}\n"
-                                  f"summary_target: {self.summary_target}\n"
-                                  f"action: {action}\n"
-                                  f"article: {self.article}")
-                    raise
-                else:
-                    reward = self._get_reward()
+                reward = self._get_reward()
 
         return obs, reward, done, {"summary": self.summary_pred}
 
@@ -426,7 +417,16 @@ class ExtractiveEnv(gym.Env):
 
     def _get_reward(self):
         prev_rouge = self.rouge_score
-        self.rouge_score = self.reward_helper.get_reward(target=self.summary_target, predicted=self.summary_pred)
+        try:
+            self.rouge_score = self.reward_helper.get_reward(target=self.summary_target, predicted=self.summary_pred)
+        except ValueError:
+                warnings.warn(f"[ROUGE WARNING] Attempting to get ROUGE score for str of len 0.\n"
+                              f"summary_pred: {self.summary_pred}\n"
+                              f"summary_target: {self.summary_target}\n"
+                              f"actions: {self.actions}\n"
+                              f"article: {self.article}")
+                self.rouge_score = prev_rouge
+
         return self.rouge_score - prev_rouge
 
     def _lcs_rouge(self, target, predicted):
