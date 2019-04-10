@@ -121,6 +121,7 @@ class Duc2007Loader(DataLoader):
 
         article = self.topic_articles[self.j].replace("\n", " ")
         summary = self.summaries.iloc[self.i]['Summary'].replace("\n", " ")
+        self.j += 1
 
         return article, summary
 
@@ -173,6 +174,7 @@ class ExtractiveEnv(gym.Env):
             self.article, self.summary_target = next(self.data_iterator)
         except StopIteration:
             print("Every article has been loaded, restarting data_iterator")
+            self.data_iterator = iter(self.data_loader)
             self.article, self.summary_target = next(self.data_iterator)
 
         # tokenize article into sentences and update article_tensor with sentence embeddings
@@ -205,6 +207,8 @@ class ExtractiveEnv(gym.Env):
 
         if self.sentences_written >= self.summary_len:
             done = True
+            self.reset()
+
         return obs, reward, done, {"summary": self.summary_pred}
 
     def _get_obs(self):
