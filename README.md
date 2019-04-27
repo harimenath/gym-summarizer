@@ -1,9 +1,8 @@
 # gym-summarizer
 The Summarizer environment is a domain for text generation in the context of summarization. 
-In the future, these tasks will be supported:
 
 ## Extractive Summarization
-Generate summaries by extracting sentence from reference documents.
+Generate summaries by extracting sentences from reference documents.
 
 ## How to replicate experiments
 1. Download [CNN-DailyMail finished file binaries](https://github.com/JafferWilson/Process-Data-of-CNN-DailyMail);  
