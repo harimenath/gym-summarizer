@@ -1,0 +1,20 @@
+{
+  "experiment_name": "cnndm_0.3.3_a2c-mlp_terminal_r1-2-l",
+  "env_name": "ExtractiveEnv-v0",
+  "rh_kwargs": {
+    "is_terminal": true,
+    "is_stochastic": false,
+    "default_reward": -0.01,
+    "error_penalty": -0.1
+  },
+  "verbose_env": false,
+  "total_steps": 1000000,
+  "train_subset": 50000,
+  "eval_increment": 10000,
+  "rh_schedule": {
+    "0": {"reward_name": "rouge-1", "reward_type": "f"},
+    "25000": {"reward_name": "rouge-2", "reward_type": "f"},
+    "50000": {"reward_name": "rouge-l", "reward_type": "f"}
+  }
+
+}
