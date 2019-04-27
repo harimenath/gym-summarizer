@@ -60,11 +60,12 @@ class DummyDataLoader(DataLoader):
 
 
 class BatchCNNDMLoader(DataLoader):
-    def __init__(self, path_to_batches: str = 'data/finished_files/train/', max_len: int = 100, embed_dim: int = 768):
+    def __init__(self, path_to_batches: str = 'data/finished_files/train/', early_stop: int = None,
+                 max_len: int = 100, embed_dim: int = 768):
         self.max_len = max_len
         self.embed_dim = embed_dim
         self.path_to_batches = path_to_batches
-
+        self.early_stop = early_stop
 
     @staticmethod
     def precompute_embeddings(path_to_binary: Path, path_to_batches: Path,
@@ -173,14 +174,19 @@ class BatchCNNDMLoader(DataLoader):
         self.batches = zip(articles_batches, tensors_batches, summaries_batches)
         self.batch = self._load_data(next(self.batches))
         self.i = 0
+        self.num_episodes = 0
         return self
 
     def __next__(self) -> Tuple[List[str], np.ndarray, str]:
+        if self.early_stop is not None and self.num_episodes >= self.early_stop:
+            raise StopIteration
+
         try:
             article = self.batch[0][self.i]
             embedding = self.batch[1][self.i]
             summary = self.batch[2][self.i]
             self.i += 1
+            self.num_episodes += 1
             return article, embedding, summary
         except IndexError:
             while True: # skip over broken batches (e.g. train 53500)

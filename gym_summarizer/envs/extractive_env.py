@@ -25,14 +25,14 @@ class RewardHelper:
         3.  Stochastic reward types.
         4.  Terminal rewards (only returned at end-of-episode) vs intermediate rewards (returned every action).
 
-        :param reward_name: ROUGE algorithm ('rouge-1', 'rouge-2', 'rouge-l')
+        :param reward_name: ROUGE algorithm ('rouge-1', 'rouge-2', 'rouge-l', 'average')
         :param reward_type: ROUGE type ('f', 'r', 'p') i.e. F1, Precision, Recall
         :param error_penalty: Reward <= 0 to penalize invalid actions (already selected or out-of-range sentences)
         :param default_reward: Reward <=0 to penalize slow episode terminations when is_terminal is True.
         :param is_terminal: Whether to return reward only on episode termination
         :param is_stochastic: Whether to return random ROUGE algorithm/type score
         """
-        assert reward_name in ['rouge-1', 'rouge-2', 'rouge-l']
+        assert reward_name in ['rouge-1', 'rouge-2', 'rouge-l', 'average']
         assert reward_type in ['f', 'r', 'p']
 
         self.reward_name = reward_name
@@ -53,7 +53,9 @@ class RewardHelper:
         :return reward: ROUGE score
         """
         rewards = self.reward_calculator(predicted, target)[0]
-        if self.is_stochastic:
+        if self.reward_name == 'average':
+            reward = np.mean([rewards[r][self.reward_type] for r in ['rouge-1', 'rouge-2', 'rouge-l']])
+        elif self.is_stochastic:
             reward = random.choice(sum((list(s.values()) for s in rewards.values()), []))
         else:
             reward = rewards[self.reward_name][self.reward_type]
@@ -76,6 +78,7 @@ class ExtractiveEnv(gym.Env):
         # dimensions
         self.article_len = data_loader.max_len
         self.summary_len = summary_len
+        self.summary_len_override = summary_len
         self.sent_embed_dim = data_loader.embed_dim
         self.observation_type = observation_type
 
@@ -93,7 +96,10 @@ class ExtractiveEnv(gym.Env):
         self.sentences_written = 0
         self.rouge_score = 0
         self.returns = 0
+        self.prev_returns = 0 # for callback function
         self.actions: set = set()
+        self.num_epochs = 0
+        self.num_episodes = 0
 
         self.reset()
 
@@ -136,6 +142,7 @@ class ExtractiveEnv(gym.Env):
             print("Every article has been loaded, restarting data_iterator")
             self.data_iterator = iter(self.data_loader)
             self.article, self.article_tensor, self.summary_target = next(self.data_iterator)
+            self.num_epochs += 1
 
         # reset everything else
         self.t = 0
@@ -143,6 +150,7 @@ class ExtractiveEnv(gym.Env):
         self.summary_tensor = np.zeros((self.summary_len, self.sent_embed_dim))
         self.sentences_written = 0
         self.rouge_score = 0
+        self.prev_returns = self.returns
         self.returns = 0
         self.actions = set()
 
@@ -165,13 +173,13 @@ class ExtractiveEnv(gym.Env):
             self.actions.add(action)
             obs = self._get_obs()
 
-            if self.sentences_written >= min(self.summary_len, len(self.article)):
+            if self.sentences_written >= min(self.summary_len_override, len(self.article)):
                 done = True
                 reward = self._get_reward()
                 if self.verbose:
                     print(self.summary_pred, "\n", f"{self.reward_helper.reward_name}-{self.reward_helper.reward_type}",
                           "\n", self.returns, "\n", "-" * 80)
-
+                self.num_episodes += 1
                 return obs, reward, done, {"summary": self.summary_pred}
 
             if self.reward_helper.is_terminal:
@@ -205,4 +213,4 @@ class ExtractiveEnv(gym.Env):
 
         reward = self.rouge_score - prev_rouge
         self.returns += reward
-        return reward * self.t ** self.reward_helper.discount_factor
+        return reward * self.reward_helper.discount_factor ** self.t
